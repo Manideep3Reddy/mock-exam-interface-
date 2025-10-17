@@ -1,26 +1,10 @@
+# app.py
 """
-Streamlit Mock Exam App (single-file)
+Streamlit Mock Exam App (single-file) — bilingual PDF aware
 
-How to run (locally):
-1. Create a virtual env and install dependencies:
-   pip install streamlit pdfplumber reportlab
-
-2. Run:
-   streamlit run streamlit_mock_exam_app.py
-
-Notes:
-- This app tries to parse MCQs from a question PDF (text-based PDF).
-- Answer key can be uploaded as a PDF or pasted as text in the format:
-    1 A
-    2 B
-  or
-    1-A
-    2-B
-  or
-    1:A
-
-- This is intended for quick deployment on Streamlit Cloud or locally. If you deploy to Streamlit Cloud, add a requirements.txt with the packages above.
-
+Run:
+  pip install streamlit pdfplumber reportlab
+  streamlit run app.py
 """
 
 import streamlit as st
@@ -32,23 +16,52 @@ from reportlab.pdfgen import canvas
 from io import BytesIO
 
 st.set_page_config(page_title="Mock Exam Interface", layout="wide")
-st.title("📘 Mock Exam Interface (MCQ)")
+st.title("📘 Mock Exam Interface (MCQ) — Bilingual PDF aware")
 
 # ---------- Helper functions ----------
 
-def extract_text_from_pdf_file(file) -> str:
+def is_page_hindi(text, threshold=0.20):
+    """Return True if fraction of Devanagari chars in text exceeds threshold."""
+    if not text:
+        return False
+    total = len(text)
+    devanagari = sum(1 for ch in text if '\u0900' <= ch <= '\u097F')
+    frac = devanagari / max(1, total)
+    return frac >= threshold
+
+def extract_pages_text(file):
+    """Return list of page texts from the PDF (in order). Uses pdfplumber."""
+    texts = []
     try:
-        text = ""
         with pdfplumber.open(file) as pdf:
             for page in pdf.pages:
-                page_text = page.extract_text()
-                if page_text:
-                    text += "\n" + page_text
-        return text
+                page_text = page.extract_text() or ""
+                texts.append(page_text)
     except Exception as e:
         st.error(f"Error reading PDF: {e}")
-        return ""
+    return texts
 
+def extract_english_text_from_bilingual_pdf(file, assume_alternating=True, first_page_is_hindi=True):
+    """
+    If assume_alternating: keep every 2nd page that corresponds to English pages.
+    Else: keep pages where Devanagari fraction is low.
+    """
+    pages = extract_pages_text(file)
+    if not pages:
+        return ""
+    english_pages = []
+    if assume_alternating:
+        # If first page is Hindi, then English pages are indexes 1,3,5,... (0-based)
+        start_idx = 1 if first_page_is_hindi else 0
+        for i in range(start_idx, len(pages), 2):
+            if pages[i]:
+                english_pages.append(pages[i])
+    else:
+        for p in pages:
+            if not is_page_hindi(p):
+                english_pages.append(p)
+    # join pages with double newlines to keep separation
+    return "\n\n".join(english_pages)
 
 def parse_mcqs_from_text(text):
     """Return list of {qnum, question, options: [..]}"""
@@ -58,20 +71,22 @@ def parse_mcqs_from_text(text):
     # Normalize newlines
     text = text.replace('\r', '\n')
 
-    # Split by question numbers like: 1.  or 1)  or newline + 1
-    parts = re.split(r"\n\s*(?=\d{1,3}[\.)])", text)
+    # Split by question numbers like: Q.1) or Q1) or 1. or 1)
+    parts = re.split(r"\n\s*(?=(?:Q\.?\s*)?\d{1,3}[\.)])", text)
     questions = []
     for p in parts:
         p = p.strip()
         if not p:
             continue
-        m = re.match(r"^(\d{1,3})[\.)]\s*(.*)$", p, re.DOTALL)
+        # Remove leading 'Q.' if present
+        p_clean = re.sub(r'^(Q\.?\s*)', '', p, flags=re.IGNORECASE)
+        m = re.match(r"^(\d{1,3})[\.)]\s*(.*)$", p_clean, re.DOTALL)
         if not m:
             continue
         qnum = m.group(1)
         body = m.group(2).strip()
         # Try to split options by lines that start with A. A) 1. 1)
-        lines = body.split('\n')
+        lines = [ln for ln in body.split('\n') if ln.strip()]
         option_lines = [ln.strip() for ln in lines if re.match(r'^(?:[A-Da-d][\.|\)]|[1-4][\.|\)])', ln.strip())]
         if option_lines:
             # Extract question text as everything before the first option line
@@ -82,9 +97,8 @@ def parse_mcqs_from_text(text):
                 m_opt = re.match(r'^(?:([A-Da-d]|[1-4]))[\.|\)]\s*(.*)$', ln.strip())
                 if m_opt:
                     opts.append(m_opt.group(2).strip())
-            # If fewer than 4 options found but options may be inline; try inline split by ' A. ' etc
+            # If fewer than 2 options found, try inline splitting
             if len(opts) < 2:
-                # try inline splitting by ' A. ' or ' A) '
                 inline_parts = re.split(r'(?=[A-D][\.|\)])', body)
                 inline_opts = []
                 for ip in inline_parts[1:]:
@@ -112,10 +126,7 @@ def parse_mcqs_from_text(text):
         })
     return questions
 
-
 def parse_answer_key_text(text):
-    """Expect lines like '1 A' or '1-A' or '1:A' or '1. A' or '1) A' or '1 - 1' (numbers)
-       Returns dict qnum -> letter (A/B/C/D) or index (1-4)"""
     mapping = {}
     if not text:
         return mapping
@@ -125,19 +136,16 @@ def parse_answer_key_text(text):
         if m:
             q = m.group(1)
             a = m.group(2).upper()
-            # normalize numbers to letters
             if a in '1234':
                 a = {'1':'A','2':'B','3':'C','4':'D'}[a]
             mapping[q] = a
         else:
-            # try pattern '1 - Option text' -> attempt to map by option text later
             m2 = re.match(r'^(\d{1,3})\s*[-:\.)]?\s*(.+)$', ln)
             if m2:
                 q = m2.group(1)
                 val = m2.group(2).strip()
-                mapping[q] = val  # could be text; we'll try to match later
+                mapping[q] = val
     return mapping
-
 
 def evaluate_responses(questions, user_answers, answer_key, negative_mark=0.0, marks_per_q=1.0):
     total = 0.0
@@ -150,14 +158,16 @@ def evaluate_responses(questions, user_answers, answer_key, negative_mark=0.0, m
         user_ans = user_answers.get(qn)
         # If answer_key has option text, attempt to find matching option letter
         if correct_ans and correct_ans not in ['A','B','C','D']:
-            # try to match by option text
             for idx, opt in enumerate(q['options']):
                 if correct_ans.lower() in opt.lower():
                     correct_ans = ['A','B','C','D'][idx]
                     break
         is_correct = False
         if correct_ans and user_ans:
-            is_correct = (correct_ans.upper() == user_ans.upper())
+            try:
+                is_correct = (correct_ans.upper() == user_ans.upper())
+            except Exception:
+                is_correct = False
         if is_correct:
             total += marks_per_q
             correct += 1
@@ -167,7 +177,6 @@ def evaluate_responses(questions, user_answers, answer_key, negative_mark=0.0, m
                 incorrect += 1
         details.append({'qnum':qn, 'correct': correct_ans, 'user': user_ans, 'is_correct': is_correct})
     return total, correct, incorrect, details
-
 
 def generate_result_pdf(student_name, exam_title, details, total_score, out_buffer: BytesIO):
     c = canvas.Canvas(out_buffer, pagesize=A4)
@@ -199,8 +208,8 @@ with st.sidebar:
     negative_mark = st.number_input("Negative marks per wrong answer", value=0.0, step=0.25)
     show_one_by_one = st.checkbox("Show one question per page", value=False)
 
-st.info("Upload question PDF (text-based, not scanned). Upload answer key PDF or paste the key.")
-qfile = st.file_uploader("Question PDF", type=['pdf'])
+st.info("Upload question PDF (text-based, not scanned). Upload answer-key PDF or paste the key. If your PDF has alternating Hindi/English pages (first page Hindi), leave the default setting enabled.")
+qfile = st.file_uploader("Question PDF (E+H) — bilingual or English-only", type=['pdf'])
 ansfile = st.file_uploader("Answer Key PDF (optional)", type=['pdf'])
 manual_key = st.text_area("Or paste answer key (one per line, e.g. '1 A')", height=120)
 
@@ -209,6 +218,13 @@ with col1:
     student_name = st.text_input("Student name")
 with col2:
     start_button = st.button("Start Exam")
+
+# bilingual options
+st.sidebar.markdown("---")
+st.sidebar.subheader("Bilingual PDF handling")
+assume_alt = st.sidebar.checkbox("PDF has strictly alternating Hindi/English pages", value=True)
+first_page_hindi = st.sidebar.checkbox("First page is Hindi (instructions)", value=True)
+st.sidebar.caption("If unsure, uncheck 'alternating' and the app will detect Hindi pages per-page using Devanagari detection.")
 
 # Initialize session state
 if 'questions' not in st.session_state:
@@ -222,16 +238,17 @@ if 'start_time' not in st.session_state:
 if 'end_time' not in st.session_state:
     st.session_state['end_time'] = None
 
-# Load PDFs when uploaded
+# Load and extract English pages when uploaded
 if qfile and (not st.session_state['questions']):
-    qtext = extract_text_from_pdf_file(qfile)
-    parsed = parse_mcqs_from_text(qtext)
+    st.info("Extracting English pages from bilingual PDF...")
+    eng_text = extract_english_text_from_bilingual_pdf(qfile, assume_alternating=assume_alt, first_page_is_hindi=first_page_hindi)
+    parsed = parse_mcqs_from_text(eng_text)
     st.session_state['questions'] = parsed
-    st.success(f"Parsed {len(parsed)} questions (parsed question count). Please verify.")
+    st.success(f"Parsed {len(parsed)} questions from English pages. Please verify and edit if needed.")
 
 # parse answer key
 if ansfile and (not st.session_state['answer_key']):
-    atext = extract_text_from_pdf_file(ansfile)
+    atext = extract_english_text_from_bilingual_pdf(ansfile, assume_alternating=False)
     key_map = parse_answer_key_text(atext)
     st.session_state['answer_key'] = key_map
     if key_map:
@@ -239,7 +256,6 @@ if ansfile and (not st.session_state['answer_key']):
 
 if manual_key:
     key_map2 = parse_answer_key_text(manual_key)
-    # merge
     st.session_state['answer_key'].update(key_map2)
 
 # Start exam
@@ -265,22 +281,30 @@ questions = st.session_state['questions']
 if questions:
     with st.form(key='exam_form'):
         if show_one_by_one:
-            # simple pagination
             if 'page' not in st.session_state:
                 st.session_state['page'] = 0
             qidx = st.session_state['page']
             q = questions[qidx]
             st.write(f"**Q{q['qnum']}**. {q['question']}")
             options = q['options']
-            # display options or placeholders
             opt_labels = ['A','B','C','D']
             if options and len(options) > 0:
-                choice = st.radio("Choose", [f"{opt_labels[i]}. {options[i]}" for i in range(len(options))], index=0 if q['qnum'] not in st.session_state['user_answers'] else ['A','B','C','D'].index(st.session_state['user_answers'][q['qnum']]))
-                # store selection as letter
+                display_choices = []
+                for i,opt in enumerate(options):
+                    label = opt_labels[i] if i < len(opt_labels) else str(i+1)
+                    display_choices.append(f"{label}. {opt}")
+                default_index = 0
+                if q['qnum'] in st.session_state['user_answers']:
+                    try:
+                        default_index = ['A','B','C','D'].index(st.session_state['user_answers'][q['qnum']])
+                    except Exception:
+                        default_index = 0
+                choice = st.radio("Choose", display_choices, index=default_index)
                 selected_letter = choice.split('.')[0].strip()
                 st.session_state['user_answers'][q['qnum']] = selected_letter
             else:
-                st.text_area("Answer (no options detected)")
+                ans_text = st.text_area("Answer (no options detected)")
+                st.session_state['user_answers'][q['qnum']] = ans_text
             coln1, coln2, coln3 = st.columns(3)
             with coln1:
                 if st.button("Previous"):
@@ -302,12 +326,6 @@ if questions:
                     for i,op in enumerate(options):
                         label = opt_labels[i] if i < 4 else str(i+1)
                         choices.append(f"{label}. {op}")
-                    default_idx = 0
-                    if q['qnum'] in st.session_state['user_answers']:
-                        try:
-                            default_idx = ['A','B','C','D'].index(st.session_state['user_answers'][q['qnum']])
-                        except Exception:
-                            default_idx = 0
                     sel = st.radio(f"Q{q['qnum']}", choices, key=f"q_{q['qnum']}")
                     sel_letter = sel.split('.')[0].strip()
                     st.session_state['user_answers'][q['qnum']] = sel_letter
@@ -317,24 +335,19 @@ if questions:
             submit_btn = st.form_submit_button("Submit Exam")
 
     if submit_btn:
-        # check time
         if st.session_state['end_time'] and time.time() > st.session_state['end_time']:
             st.warning("Time is over. Submission recorded but exam time exceeded.")
-        # evaluate
         total, correct, incorrect, details = evaluate_responses(questions, st.session_state['user_answers'], st.session_state['answer_key'], negative_mark=negative_mark, marks_per_q=marks_per_q)
         st.success(f"Score: {total} | Correct: {correct} | Incorrect: {incorrect}")
-        # show per question
         with st.expander("Per-question details"):
             for d in details:
                 st.write(f"Q{d['qnum']}: your={d['user']} correct={d['correct']} -> {'Correct' if d['is_correct'] else 'Wrong'}")
-        # allow PDF download
         buf = BytesIO()
         generate_result_pdf(student_name or 'Student', exam_title, details, total, buf)
         st.download_button("Download result PDF", data=buf, file_name=f"{exam_title.replace(' ','_')}_result.pdf", mime='application/pdf')
 
 else:
-    st.info("Upload a question PDF to begin.")
+    st.info("Upload a question PDF to begin. Use the sidebar to control bilingual handling if needed.")
 
 st.markdown("---")
-st.caption("Built for quick mock exams. If parsing isn't perfect, you can paste the answer key manually. For large-scale or live-timed exams, consider integrating a JS timer component and more robust PDF parsing.")
-
+st.caption("Built for quick mock exams. If parsing isn't perfect, paste/edit the answer key manually. For very large or scanned PDFs, consider OCR first (e.g., using Tesseract) and then upload the extracted text.")
