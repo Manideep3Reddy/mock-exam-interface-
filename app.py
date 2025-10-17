@@ -337,3 +337,4 @@ else:
 
 st.markdown("---")
 st.caption("Built for quick mock exams. If parsing isn't perfect, you can paste the answer key manually. For large-scale or live-timed exams, consider integrating a JS timer component and more robust PDF parsing.")
+
