@@ -1,4 +1,3 @@
-# app.py
 """
 Streamlit Mock Exam App — tailored for two-column bilingual PDFs (English pages alternate)
 Run:
@@ -142,7 +141,7 @@ def parse_all_columns_to_questions(full_text):
     """
     if not full_text:
         return []
-    column_texts = re.split(r'\n\s*\n\s*\n', full_text)  # attempt to split big gaps between columns
+    column_texts = re.split(r'\n\s*\n\s*\n', full_text) # attempt to split big gaps between columns
     # fallback: split by double newline if triple newline didn't appear
     if len(column_texts) == 1:
         column_texts = full_text.split('\n\n')
@@ -337,10 +336,12 @@ if manual_key:
 if st.session_state['questions']:
     st.markdown("### Parsed questions (edit if parsing errors occurred). Editing here will change what exam uses.")
     edited_questions = []
-    for q in st.session_state['questions']:
+    # FIX 1: Use enumerate to get a unique index `idx` for each question
+    for idx, q in enumerate(st.session_state['questions']):
         qid = q['qnum']
         with st.expander(f"Q{qid}: {q['question'][:80]}...", expanded=False):
-            new_qtext = st.text_area(f"Question {qid} text", value=q['question'], key=f"qtext_{qid}")
+            # Use `idx` in the key to ensure it's always unique
+            new_qtext = st.text_area(f"Question {qid} text", value=q['question'], key=f"qtext_{qid}_{idx}")
             # show options with editable fields
             opts = q.get('options', [])
             # ensure up to 4 option fields
@@ -348,7 +349,8 @@ if st.session_state['questions']:
                 opts.append("")
             new_opts = []
             for i in range(4):
-                new_opt = st.text_input(f"Q{qid} option {['A','B','C','D'][i]}", value=opts[i], key=f"opt_{qid}_{i}")
+                # Use `idx` in the key here as well
+                new_opt = st.text_input(f"Q{qid} option {['A','B','C','D'][i]}", value=opts[i], key=f"opt_{qid}_{idx}_{i}")
                 new_opts.append(new_opt)
             edited_questions.append({'qnum': qid, 'question': new_qtext, 'options': new_opts})
     # replace
@@ -378,17 +380,18 @@ if start_button:
         st.session_state['start_time'] = time.time()
         st.session_state['end_time'] = st.session_state['start_time'] + duration_min * 60
         st.success("Exam started — timer running.")
+        st.experimental_rerun()
 
 # Timer display
-if st.session_state.get('start_time'):
-    rem = int(st.session_state['end_time'] - time.time())
+if st.session_state.get('start_time') and not st.session_state.get('submitted'):
+    rem = int(st.session_state.get('end_time', 0) - time.time())
     if rem < 0:
         rem = 0
     st.markdown(f"**Time remaining:** {rem//60:02d}:{rem%60:02d}")
 
 # Show exam form
 questions = st.session_state.get('questions', [])
-if questions:
+if questions and st.session_state.get('start_time') and not st.session_state.get('submitted'):
     with st.form("exam_form"):
         if show_one_by_one:
             if 'page' not in st.session_state:
@@ -403,12 +406,19 @@ if questions:
                 if o and o.strip():
                     choices.append(f"{labels[i]}. {o}")
             if not choices:
-                ans_text = st.text_area("Answer text (no options detected)")
-                st.session_state['user_answers'][q['qnum']] = ans_text
+                ans_text = st.text_area("Answer text (no options detected)", key=f"free_{q['qnum']}_{idx}")
+                if ans_text: st.session_state['user_answers'][q['qnum']] = ans_text
             else:
-                sel = st.radio("Choose", choices, key=f"sel_{q['qnum']}")
-                st.session_state['user_answers'][q['qnum']] = sel.split('.')[0].strip()
-            c1,c2,c3 = st.columns(3)
+                default_index = 0
+                if st.session_state['user_answers'].get(q['qnum']):
+                    try:
+                        default_index = labels.index(st.session_state['user_answers'][q['qnum']])
+                    except ValueError:
+                        default_index = 0
+                sel = st.radio("Choose", choices, key=f"sel_{q['qnum']}", index=default_index)
+                if sel: st.session_state['user_answers'][q['qnum']] = sel.split('.')[0].strip()
+
+            c1,c2,c3, c4 = st.columns(4)
             with c1:
                 if st.form_submit_button("Previous"):
                     st.session_state['page'] = max(0, st.session_state['page'] - 1)
@@ -417,10 +427,12 @@ if questions:
                 if st.form_submit_button("Next"):
                     st.session_state['page'] = min(len(questions)-1, st.session_state['page'] + 1)
                     st.experimental_rerun()
-            with c3:
+            with c4:
                 submit_btn = st.form_submit_button("Submit Exam")
-        else:
-            for q in questions:
+
+        else: # Show all questions at once
+            # FIX 2: Use enumerate here as well for the 'show all' mode
+            for idx, q in enumerate(questions):
                 st.write(f"**Q{q['qnum']}**. {q['question']}")
                 opts = q['options']
                 labels = ['A','B','C','D']
@@ -429,27 +441,40 @@ if questions:
                     for i,o in enumerate(opts):
                         if o and o.strip():
                             choices.append(f"{labels[i]}. {o}")
-                    sel = st.radio(f"Q{q['qnum']}", choices, key=f"q_{q['qnum']}")
-                    st.session_state['user_answers'][q['qnum']] = sel.split('.')[0].strip()
+                    # Use `idx` in the key to make it unique
+                    sel = st.radio(f"Options for Q{q['qnum']}", choices, key=f"q_{q['qnum']}_{idx}", label_visibility="collapsed")
+                    if sel: st.session_state['user_answers'][q['qnum']] = sel.split('.')[0].strip()
                 else:
-                    txt = st.text_area(f"Q{q['qnum']} answer (no options detected)", key=f"free_{q['qnum']}")
-                    st.session_state['user_answers'][q['qnum']] = txt
+                    # Use `idx` in the key to make it unique
+                    txt = st.text_area(f"Answer for Q{q['qnum']} (no options detected)", key=f"free_{q['qnum']}_{idx}", label_visibility="collapsed")
+                    if txt: st.session_state['user_answers'][q['qnum']] = txt
+                st.markdown("---")
             submit_btn = st.form_submit_button("Submit Exam")
 
-    if 'submit_btn' in locals() and submit_btn:
-        # check time
-        if st.session_state.get('end_time') and time.time() > st.session_state['end_time']:
-            st.warning("Time exceeded — submission recorded but time over.")
-        total, corr, inc, details = evaluate_responses(questions, st.session_state['user_answers'], st.session_state['answer_key'], negative_mark=negative_mark, marks_per_q=marks_per_q)
-        st.success(f"Score: {total} | Correct: {corr} | Incorrect: {inc}")
-        with st.expander("Per-question details"):
-            for d in details:
-                st.write(f"Q{d['qnum']}: your={d['user']} correct={d['correct']} -> {'Correct' if d['is_correct'] else 'Wrong'}")
-        buf = BytesIO()
-        generate_result_pdf(student_name or "Student", exam_title, details, total, buf)
-        st.download_button("Download Result PDF", data=buf, file_name=f"{exam_title.replace(' ','_')}_result.pdf", mime='application/pdf')
+        if 'submit_btn' in locals() and submit_btn:
+            st.session_state['submitted'] = True
+            # check time
+            if st.session_state.get('end_time') and time.time() > st.session_state['end_time']:
+                st.warning("Time exceeded — submission recorded but time was over.")
+            
+            st.experimental_rerun()
 
-else:
+if st.session_state.get('submitted'):
+    st.header("Exam Results")
+    total, corr, inc, details = evaluate_responses(questions, st.session_state['user_answers'], st.session_state['answer_key'], negative_mark=negative_mark, marks_per_q=marks_per_q)
+    st.success(f"**Score: {total}** | Correct: {corr} | Incorrect: {inc} | Unattempted: {len(questions) - (corr+inc)}")
+    
+    with st.expander("Per-question details"):
+        for d in details:
+            status = 'Correct' if d['is_correct'] else ('Wrong' if d['user'] else 'Unattempted')
+            st.write(f"Q{d['qnum']}: Your answer = **{d['user'] or 'N/A'}**, Correct answer = **{d['correct']}** -> *{status}*")
+    
+    buf = BytesIO()
+    generate_result_pdf(student_name or "Student", exam_title, details, total, buf)
+    st.download_button("Download Result PDF", data=buf, file_name=f"{exam_title.replace(' ','_')}_result.pdf", mime='application/pdf')
+
+
+elif not st.session_state.get('start_time'):
     st.info("Upload Question PDF (E+H) to begin. After parsing, edit questions if needed, upload solution PDF, then Start Exam.")
 
 st.markdown("---")
